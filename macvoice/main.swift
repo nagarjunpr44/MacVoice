@@ -7,7 +7,7 @@ import AVFoundation
 import Speech
 
 // MARK: options (globals first: main.swift runs top to bottom)
-var live = true, alwaysOn = true, noScreen = false, demo = false, repl = false, snapOnly = false, micTest = false, menuList = false, tabList = false
+var live = true, alwaysOn = true, noScreen = false, demo = false, repl = false, snapOnly = false, micTest = false, menuList = false, tabList = false, policyList = false
 var textCmd: String?, targetApp: String?, wake = "computer", silenceMs = 700, delaySec = -1.0, model = "jev-latest"
 do {
   var a = Array(CommandLine.arguments.dropFirst())
@@ -23,6 +23,7 @@ do {
     case "--snapshot": snapOnly = true
     case "--menus": menuList = true
     case "--tabs": tabList = true
+    case "--policy": policyList = true
     case "--mic-test": micTest = true
     case "--text": textCmd = next()
     case "--target": targetApp = next()
@@ -34,16 +35,11 @@ do {
     }
   }
 }
-let textMode = textCmd != nil || repl || demo || snapOnly || menuList || tabList
+let textMode = textCmd != nil || repl || demo || snapOnly || menuList || tabList || policyList
 // Launched from Finder there are no flags, so fall back to however you last left it.
 if !textMode, UserDefaults.standard.object(forKey: "live") != nil { live = UserDefaults.standard.bool(forKey: "live") }
 
-// MARK: safety knobs (all deterministic code, none of it asks the model)
-let deniedApps = ["com.apple.keychainaccess", "com.apple.Passwords", "com.1password", "com.agilebits", "com.bitwarden",
-                  "com.lastpass", "com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp"]
-func isDenied(_ b: String) -> Bool { deniedApps.contains { b.hasPrefix($0) } }
-let riskRe = try! NSRegularExpression(pattern: "\\b(delete|remove|erase|trash|send|submit|pay|purchase|buy|order|checkout|confirm|sign out|log out|logout|quit|format|transfer|publish|post|empty|discard|reset|uninstall|unsubscribe)\\b", options: .caseInsensitive)
-func risky(_ s: String) -> Bool { riskRe.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
+// MARK: redaction (the safety policy itself lives in policy.swift)
 let emailRe = try! NSRegularExpression(pattern: "[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", options: .caseInsensitive)
 let digitsRe = try! NSRegularExpression(pattern: "\\d{6,}")
 func clean(_ s: String) -> String {  // what a label looks like after redaction, before it leaves the Mac
@@ -461,7 +457,8 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     ui(.fail("not sure what you mean")); beep("Basso"); return
   }
   if isDenied(screen.bundle) && intent != "open_app" { print("  ✗ \(screen.app) is on the deny list; only \"open <app>\" works here"); beep("Basso"); return }
-  var desc = "", isRisky = dest >= 0.5, run: () -> Void = {}, why = ""
+  var desc = "", isRisky = dest >= 0.5, run: () -> Void = {}, why = "", subject = ""
+  var self_why = ""
   switch intent {
   case "click":
     guard let (tid, tc) = pick(ans, "target", 0.40, 0.55), tid != "none", let el = screen.els.first(where: { $0.id == tid }) else {
@@ -469,12 +466,14 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
       print("  ✗ no confident target. closest: \(alts.joined(separator: " | ")) (\(screen.els.count) elements seen in \(screen.app))"); beep("Basso"); return
     }
     desc = "click \(el.role) \"\(el.label)\" in \(screen.app) (\(f2(tc)))"
-    if risky(el.label) || risky(text) { isRisky = true; why = " [risk word]" }
+    subject = el.label
     run = { click(el, screen) }
   case "open_app":
     guard let (a, ac) = pick(ans, "app", 0.45, 0.55), a != "none", let url = apps[a] else { print("  ✗ which app? \(ans.top("app", 3).map { "\($0.0) \(f2($0.1))" }.joined(separator: ", "))"); beep("Basso"); return }
     let mon = pick(ans, "monitor", 0.45, 0.50)?.0 ?? "none"
     desc = "open \(a)\(mon == "none" ? "" : " on the \(mon) display") (\(f2(ac)))"
+    subject = a
+    guard policyAllowsOpening(a) else { print("  ⛔ blocked: \(a) is not voice-controllable"); ui(.fail("blocked: \(a)")); beep("Basso"); return }
     isRisky = false
     run = { mon == "none" ? openApp(url) : openApp(url) { placeWindow(of: $0, named: mon) } }
   case "scroll":
@@ -482,7 +481,7 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     desc = "scroll \(d) in \(screen.app) (\(f2(dc)))"; isRisky = false; run = { scroll(d, screen) }
   case "press_key":
     guard let (k, kc) = pick(ans, "key", 0.45, 0.55), k != "none" else { print("  ✗ which key? \(ans.top("key", 3).map { "\($0.0) \(f2($0.1))" }.joined(separator: ", "))"); return }
-    desc = "press \(k) in \(screen.app) (\(f2(kc)))"; isRisky = k == "quit_app" || dest >= 0.5; run = { pressKey(k) }
+    desc = "press \(k) in \(screen.app) (\(f2(kc)))"; subject = k; isRisky = k == "quit_app" || dest >= 0.5; run = { pressKey(k) }
   case "search":
     guard let (sid, sc) = ans.choice("query"), let qi = Int(sid.dropFirst()), qi < spansFor(text).count else {
       print("  ✗ could not tell what to search for"); beep("Basso"); return
@@ -541,7 +540,7 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     }
     let cmd = screen.menus[idx]
     desc = "menu \(cmd.path) in \(screen.app) (\(f2(mc)))"
-    if risky(cmd.path) || risky(text) { isRisky = true; why = " [risk word]" }
+    subject = cmd.path
     run = { if !pressMenu(cmd) { print("  ! menu press failed; try saying the shortcut instead") } }
   case "type_text":
     guard let r = text.range(of: "\\b(?:type|write|enter|dictate|say)\\b\\s+(.+)$", options: [.regularExpression, .caseInsensitive]) else { print("  ✗ say what to type: \"type hello world\""); return }
@@ -549,11 +548,20 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     desc = "type \"\(payload)\" into \(screen.app)"; isRisky = false; run = { typeText(payload) }
   default: return
   }
+  switch judge(subject: subject, utterance: text, appName: intent == "open_app" ? subject : "") {
+  case .block(let why):
+    print("  ⛔ blocked by policy: \(why) — \(desc)")
+    ui(.fail("blocked: \(why)")); beep("Basso"); return
+  case .confirm(let why):
+    isRisky = true; self_why = " [\(why)]"
+  case .allow:
+    break
+  }
   print("  cmd \(f2(isCmd)) · intent \(intent) p\(f2(intentTop?.1 ?? 0))/c\(f2(ic)) · destructive \(f2(dest)) · \(screen.els.count) elements, \(screen.menus.count) menus, \(screen.tabs.count) tabs, \(screen.wins.count) windows, \(tokens) tokens")
   print("  ⏱ read screen \(axMs) ms · Jev \(jevMs) ms · total \(ms(t0)) ms")
   let act = live && !demo
   if isRisky {
-    print("  ⚠ risky\(why): \(desc)")
+    print("  ⚠ needs confirmation\(self_why.isEmpty ? why : self_why): \(desc)")
     if !act { print("  DRY-RUN: would ask for confirmation"); return }
     if voice { pending = (desc, run, Date().addingTimeInterval(10)); print("  say \"confirm\" within 10 s (or \"cancel\")"); ui(.warn("say \"confirm\": " + desc)); beep("Tink") }
     else { print("  proceed? [y/N] ", terminator: ""); if readLine()?.lowercased().hasPrefix("y") == true { run(); beep("Pop") } }
@@ -676,7 +684,31 @@ if !demo && !AXIsProcessTrusted() && !noScreen {
   print("Accessibility is not granted to this terminal. Run once with prompt: System Settings > Privacy & Security > Accessibility > enable your terminal app, then re-run.")
   if snapOnly || live { _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary); exit(1) }
 }
-if tabList {
+if policyList {
+  Task {
+    let samples = [
+      "File > Move to Trash", "File > Delete Immediately…", "Finder > Empty Trash",
+      "File > Eject", "Apple > Shut Down", "Apple > Log Out", "Chrome > Sign Out",
+      "File > New Tab", "View > Zoom In", "Edit > Copy", "Window > Minimize",
+      "Mail > Send Message", "File > Export as PDF", "Safari > Reset Safari",
+      "Edit > Undo", "File > Save", "Store > Buy Now", "Settings > Reset All Settings",
+    ]
+    print("menu commands — offered to the model?")
+    for m in samples {
+      let offered = policyAllowsMenu(m)
+      let v = judge(subject: m, utterance: "")
+      var note = "allow"
+      if case .confirm(let w) = v { note = "CONFIRM (\(w))" }
+      if case .block(let w) = v { note = "BLOCK (\(w))" }
+      print("  \(offered ? "offered " : "FILTERED") \(m.padding(toLength: 34, withPad: " ", startingAt: 0)) \(note)")
+    }
+    print("\napps — openable by voice?")
+    for a in ["Safari", "Terminal", "Keychain Access", "System Settings", "1Password", "Calculator", "iTerm"] {
+      print("  \(policyAllowsOpening(a) ? "allow " : "BLOCK ") \(a)")
+    }
+    exit(0)
+  }
+} else if tabList {
   Task {
     print("allBrowserTabs() -> \(allBrowserTabs().count) tabs")
     for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
@@ -715,7 +747,14 @@ if tabList {
     }
     if let t = textCmd, !t.isEmpty {
       await one(t)
-      _ = placementGroup.wait(timeout: .now() + 9)   // window placement finishes after the command
+      // Window placement finishes after the command returns; wait off the async context
+      // (a bare DispatchGroup.wait is an error under Swift 6 concurrency checking).
+      await withCheckedContinuation { cont in
+        DispatchQueue.global(qos: .userInitiated).async {
+          _ = placementGroup.wait(timeout: .now() + 9)
+          cont.resume()
+        }
+      }
       exit(0)
     }
     print(demo ? "demo screen: Cancel, Submit, Save draft, Pricing, Docs, Search, Remember me, Sign in, File, Edit, Delete account, Contact sales. Type commands; Ctrl-D quits." : "type commands; Ctrl-D quits.")

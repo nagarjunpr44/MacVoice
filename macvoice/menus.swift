@@ -72,7 +72,9 @@ func menuCommands(for app: NSRunningApplication, limit: Int = 240, perMenuLimit:
       let subs = children(item)                        // an AXMenuItem's submenu is its only child
       if let sub = subs.first, !children(sub).isEmpty {
         taken += walk(sub, prefix: path, depth: depth + 1)
-      } else if enabled(item) {
+      } else if enabled(item), policyAllowsMenu(path) {
+        // Blocked commands are dropped here rather than checked later: the model cannot choose
+        // an option it was never shown.
         out.append(MenuCmd(path: path, shortcut: shortcutOf(item), el: item))
         taken += 1
       }
