@@ -33,3 +33,6 @@ docs/
 
 # Code-signing artifact from build.sh
 macvoice/_CodeSignature/
+
+# Internal dev changelog — kept local, not published
+CLAUDE.md

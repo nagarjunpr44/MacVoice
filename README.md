@@ -1,7 +1,6 @@
 # macvoice
 
-Control your Mac by talking to it. Say *"open chrome"*, *"make the text bigger"*, *"go to the wikipedia
-tab"*, *"play the current video"*, *"put this window on the other screen"* — it clicks, opens,
+Control your Mac by talking to it. Say *"open chrome"*, *"make the text bigger"*, *"go to the wikipedia tab"*, *"play the current video"*, *"put this window on the other screen"* — it clicks, opens,
 scrolls, types, runs menu commands and moves windows.
 
 Speech is recognised **on-device**. Each utterance becomes **one** request to
