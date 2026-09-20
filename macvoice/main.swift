@@ -238,7 +238,30 @@ let keyTable: [(String, CGKeyCode, CGEventFlags, String)] = [
   ("tab", 48, [], "Press the Tab key to move to the next field"), ("minimize", 46, .maskCommand, "Minimize the window"),
   ("hide_app", 4, .maskCommand, "Hide the current application"), ("quit_app", 12, .maskCommand, "Quit the current application"),
 ]
+/// System media keys. "Play the video" is not a click: YouTube's button keeps the label "Pause (k)"
+/// whatever the state, so element matching cannot work. A media key reaches whatever is playing,
+/// in any app, with no element to find.
+let mediaKeys: [(String, Int32, String)] = [
+  ("play_pause", 16, "Play, pause, or resume the video, music or media that is playing"),
+  ("next_track", 17, "Skip to the next track or video"),
+  ("prev_track", 18, "Go back to the previous track or video"),
+  ("volume_up", 0, "Turn the volume up"),
+  ("volume_down", 1, "Turn the volume down"),
+  ("mute", 7, "Mute or unmute the sound"),
+]
+func pressMediaKey(_ code: Int32) {
+  for down in [true, false] {
+    let flags = NSEvent.ModifierFlags(rawValue: UInt(down ? 0xA00 : 0xB00))
+    let data1 = Int((code << 16) | ((down ? 0xA : 0xB) << 8))
+    guard let e = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: flags,
+                                     timestamp: 0, windowNumber: 0, context: nil,
+                                     subtype: 8, data1: data1, data2: -1) else { continue }
+    e.cgEvent?.post(tap: .cghidEventTap)
+  }
+}
+
 func pressKey(_ name: String) {
+  if let m = mediaKeys.first(where: { $0.0 == name }) { pressMediaKey(m.1); return }
   guard let k = keyTable.first(where: { $0.0 == name }) else { return }
   let src = CGEventSource(stateID: .hidSystemState)
   for down in [true, false] { let e = CGEvent(keyboardEventSource: src, virtualKey: k.1, keyDown: down); e?.flags = k.2; post(e); usleep(5000) }
@@ -324,15 +347,16 @@ func questions(_ s: Screen, _ apps: [String: URL], _ rawUtterance: String) -> [S
   for n in names { appOpts[n] = NSNull() }
   var keyOpts: [String: Any] = ["none": "No keyboard action is requested"]
   for k in keyTable { keyOpts[k.0] = k.3 }
+  for m in mediaKeys { keyOpts[m.0] = m.2 }
   var q: [String: Any] = [
     "is_command": ["type": "noul", "instructions": "The utterance tells the computer to do something. This includes naming a button, link or menu to click ('delete account', 'save draft'), an app to open, an editing or navigation action ('copy that', 'undo', 'go back', 'new tab'), scrolling, and text to type. It excludes conversation between people, questions asked of a person, and thinking out loud.", "criteria": ["true": "An instruction addressed to the computer, even a very short one naming only a control", "false": "Conversation, a question, a remark, or speech not addressed to the computer"]],
     "destructive": ["type": "noul", "instructions": "Carrying out the utterance would delete, send, submit, purchase, quit, sign out or otherwise be hard to undo."],
     "intent": ["type": "choice", "instructions": "What operation does the utterance ask the computer to perform? An utterance that only names a control, such as 'delete account' or 'save draft', is asking to click that control.", "criteria": [
-      "click": "Click, press, select, toggle, focus or open a control shown on screen, such as a button, link, checkbox, tab, field or menu. Also covers an utterance that just names such a control.",
+      "click": "Click, press, select, toggle, focus or open a control shown on screen, such as a button, link, checkbox, tab, field or menu. Also covers an utterance that just names such a control. Does NOT cover playing, pausing or skipping media, or changing the volume.",
       "open_app": "Open, launch or switch to an application by name",
       "scroll": "Scroll, move or jump the current view up, down, to the top or to the bottom",
       "type_text": "Type, write or enter specific words into the focused field",
-      "press_key": "Perform an editing, navigation or window action normally done with a keyboard shortcut: copy, cut, paste, undo, redo, select all, save, find, new tab, close tab, next or previous tab, back, forward, reload, enter, escape, minimise, hide or quit",
+      "press_key": "Perform an action done with a keyboard or media key rather than by clicking something. Two kinds: editing and navigation (copy, cut, paste, undo, redo, select all, save, find, new tab, close tab, next or previous tab, back, forward, reload, enter, escape, minimise, hide, quit), AND media control — playing, pausing or resuming a video or music, skipping to the next or previous track, and changing or muting the volume. Media control belongs here even when the media is on a web page, because it is not a button that has to be found on screen.",
       "search": "Search the web, or a specific site such as YouTube, Wikipedia, GitHub, Amazon or Maps, for something",
       "switch_tab": "Go to, switch to or find an already-open browser tab",
       "window": "Go to, focus, move, resize, maximise or minimise one of the open windows",
@@ -403,10 +427,18 @@ var pending: (desc: String, run: () -> Void, expires: Date)?
 var busy = false
 let confirmWords: Set<String> = ["confirm", "yes", "do it", "go ahead", "yes confirm"], cancelWords: Set<String> = ["cancel", "no", "stop", "never mind", "nevermind"]
 func f2(_ x: Double) -> String { String(format: "%.2f", x) }
-/// Returns the winning option and its probability, gated on probability OR confidence.
+/// Returns the winning option and its probability.
+///
+/// Gating on absolute probability alone is wrong when the option list is long: with 106 elements on
+/// screen the right answer scored 0.33-0.37 against a runner-up of 0.02 and was rejected four times
+/// in a row. Probability is split across every option, so what matters is how far the winner is
+/// AHEAD of the field, not its raw value. A 17x margin is a confident answer however small it looks.
 func pick(_ ans: Answers, _ key: String, _ minP: Double, _ minC: Double) -> (String, Double)? {
-  guard let (choice, conf) = ans.choice(key), let (topId, p) = ans.top(key, 1).first, topId == choice,
-        p >= minP || conf >= minC else { return nil }
+  guard let (choice, conf) = ans.choice(key), let top = ans.top(key, 2).first, top.0 == choice else { return nil }
+  let p = top.1
+  let runnerUp = ans.top(key, 2).dropFirst().first?.1 ?? 0
+  let dominates = p >= 0.15 && p >= runnerUp * 3          // clearly ahead of everything else
+  guard p >= minP || conf >= minC || dominates else { return nil }
   return (choice, p)
 }
 func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, apps: [String: URL], allowSplit: Bool = true) async {
@@ -488,7 +520,12 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
   switch intent {
   case "click":
     guard let (tid, tc) = pick(ans, "target", 0.40, 0.55), tid != "none", let el = screen.els.first(where: { $0.id == tid }) else {
-      let alts = ans.top("target", 3).compactMap { p in screen.els.first { $0.id == p.0 }.map { "\($0.role) \"\($0.label)\" \(f2(p.1))" } }
+      // Show `none` too: it was being filtered out of this line, which hid the fact that the model
+      // was choosing "no element matches" rather than the gate rejecting a good answer.
+      let alts = ans.top("target", 4).map { p -> String in
+        guard p.0 != "none", let e = screen.els.first(where: { $0.id == p.0 }) else { return "none \(f2(p.1))" }
+        return "\(e.role) \"\(e.label.prefix(28))\" \(f2(p.1))"
+      }
       print("  ✗ no confident target. closest: \(alts.joined(separator: " | ")) (\(screen.els.count) elements seen in \(screen.app))"); beep("Basso"); return
     }
     desc = "click \(el.role) \"\(el.label)\" in \(screen.app) (\(f2(tc)))"
