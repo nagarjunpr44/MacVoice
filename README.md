@@ -1,13 +1,14 @@
 # macvoice
 
 Control your Mac by talking to it. Say *"open chrome"*, *"make the text bigger"*, *"go to the wikipedia
-tab"* — it clicks, opens, scrolls, types and runs menu commands.
+tab"*, *"play the current video"*, *"put this window on the other screen"* — it clicks, opens,
+scrolls, types, runs menu commands and moves windows.
 
 Speech is recognised **on-device**. Each utterance becomes **one** request to
 [TypeSafe Jev](https://docs.typesafe.ai), a System One model that returns a typed decision with
-probabilities instead of generated text. Jev only ever *chooses* from options this app supplies —
-it cannot invent an action or write text — and your code decides whether that choice is confident
-enough to act on.
+probabilities instead of generated text. Jev only ever *chooses* from options this app observed on
+your screen — it cannot invent an action, name a button that isn't there, or write text — and your
+code decides whether that choice is confident enough to act on.
 
 Typical command: **~300 ms** of model time, about **$0.0002**.
 
@@ -17,14 +18,16 @@ Typical command: **~300 ms** of model time, about **$0.0002**.
 
 | Say | What happens |
 | --- | --- |
-| "open chrome", "open safari" | Launches or switches to the app |
+| "open chrome", "open chrome in work profile" | Launches an app, optionally a specific browser profile |
 | "click sign in", "tick remember me" | Clicks any labelled button, link, checkbox or tab on screen |
-| "make the text bigger", "open a private window" | Runs the app's own **menu commands** — no keyboard shortcut needed |
+| "make the text bigger", "open a private window" | Runs the app's own **menu commands** — no shortcut needed |
 | "go to the wikipedia tab" | Switches to any open tab, in **any window of any browser** |
-| "search for best ramen in tokyo", "search youtube for lofi" | Opens a search in a new tab |
-| "scroll down", "go to the bottom" | Scrolls the focused window |
-| "copy this", "undo", "new tab", "go back" | 24 keyboard shortcuts |
-| "type hello world" | Types into the focused field |
+| "open youtube", "search youtube for lofi" | Opens a site, or searches the web or a specific site |
+| "play the current video", "pause", "next", "volume up" | **Media keys** — work on whatever is playing, in any app |
+| "maximize this window", "put this on the other screen" | Window and multi-display management |
+| "scroll down", "copy this", "undo", "new tab" | Scrolling and 24 keyboard shortcuts |
+| "open chrome on the external display **and** calculator on the built in display" | **Compound commands** — several actions in one sentence |
+| "play the Avengers Doomsday trailer" | **Multi-step task** — it works out the steps itself |
 
 Nothing is hardcoded. Tabs, menu commands and on-screen controls are read from your Mac on **every
 command**, so a tab you opened a second ago is immediately sayable, and one you closed is gone.
@@ -55,9 +58,14 @@ macOS will ask on first run. All are genuinely required:
 | **Microphone** | To hear you | System Settings → Privacy & Security → Microphone |
 | **Speech Recognition** | On-device transcription | …→ Speech Recognition |
 | **Accessibility** | Read on-screen controls, and click/type | …→ Accessibility → **+** → add `macvoice.app` |
-| **Automation** | Read browser tabs, open searches | …→ Automation → macvoice |
+| **Automation** | Read browser tabs, open sites | …→ Automation → macvoice |
 
 `./grant.sh` resets the Accessibility entry and opens the right pane if it gets stuck.
+
+**Optional, for faster web pages:** Chrome/Brave → View → Developer → **Allow JavaScript from Apple
+Events**. This lets macvoice read a page through the DOM (~23 ms) instead of the Accessibility tree
+(1.8–3.3 s on a heavy page). Note it also lets *any* app script your browser, so it is a real
+widening of what other software can reach — everything still works without it, just slower.
 
 ---
 
@@ -71,7 +79,8 @@ The menu bar icon is the whole interface:
 | **◎** | Dry-run — decisions are logged, nothing happens |
 | **◌** | Muted — not listening |
 
-Click it for **Mute**, **Live/Dry-run**, **Open at Login** and **Quit**. **⌘M** mutes from anywhere.
+Click it for **Mute**, **Live/Dry-run**, **Open at Login** and **Quit**. **⌘M** mutes from anywhere
+(macvoice claims that shortcut system-wide while running, so Minimize Window is unavailable).
 
 On a notched Mac, an island grows out of the notch: a live waveform of your voice while you speak,
 then what it did. It never takes focus or intercepts clicks.
@@ -80,13 +89,16 @@ Commands act on the app that is **frontmost when you stop speaking**.
 
 ### Safety
 
-- **Dry-run first** if you're unsure: menu bar → Dry-run.
-- Anything destructive (delete, send, pay, quit, sign out…) asks you to say **"confirm"** — driven by
-  a word list in code, not by the model's judgement alone.
-- Low confidence refuses and explains instead of guessing.
-- Password fields are never read. Keychain, 1Password, Bitwarden, LastPass and terminals are on a
-  deny list: their screens aren't read at all.
-- **⌘M** stops it listening instantly.
+Three tiers, all enforced in code rather than left to the model:
+
+- **Blocked outright** and never even offered as an option: Empty Trash, Shut Down, Log Out, Reset
+  All Settings, erasing disks, disabling security features.
+- **Requires a spoken "confirm"**: delete, send, buy, quit, sign out, discard, install.
+- **Blocked apps**: terminals, password managers, System Settings, Disk Utility, VMs, security
+  tools — their screens aren't even read.
+
+Run `./macvoice --policy` to print the whole verdict table. Password fields are never collected.
+Low confidence refuses and explains rather than guessing. **⌘M** stops it listening instantly.
 
 ### Privacy
 
@@ -94,10 +106,10 @@ Per command, over HTTPS: **your words**, the **frontmost app's name**, and the *
 controls** (e.g. `button: Sign in`), plus open tab titles and menu command names.
 
 Never sent: audio (recognition is on-device), screenshots, page contents, password fields, or
-anything from a deny-listed app. Nothing is sent unless you speak.
+anything from a blocked app. Nothing is sent unless you speak.
 
-Run with `--no-screen` to send only your words — you keep apps, scrolling, shortcuts and typing, and
-lose clicking by name. `--snapshot` prints exactly what would be sent, without sending it.
+`--no-screen` sends only your words — you keep apps, scrolling, shortcuts and typing, and lose
+clicking by name. `--snapshot` prints exactly what would be sent, without sending it.
 
 ---
 
@@ -112,11 +124,13 @@ The `.app` is for daily use; the CLI is for debugging.
 ./macvoice --snapshot            # what the screen looks like to it
 ./macvoice --menus               # every menu command it can see
 ./macvoice --tabs                # tabs per browser + automation status
+./macvoice --dom                 # DOM element table + read time
+./macvoice --policy             # what is blocked, confirmed, allowed
 ./macvoice --mic-test            # permissions, mic format, live level meter
 ```
 
-Flags: `--dry-run`, `--target <App>` (pin commands to one app), `--no-screen`, `--wake <word>`
-(require a wake word), `--silence <ms>`, `--model <id>`.
+Flags: `--dry-run`, `--target <App>` (pin commands to one app), `--no-screen`, `--wake <word>`,
+`--silence <ms>`, `--model <id>`.
 
 ---
 
@@ -124,24 +138,38 @@ Flags: `--dry-run`, `--target <App>` (pin commands to one app), `--no-screen`, `
 
 ```
 speech ─► on-device transcription ─► [screen read starts while you talk]
-                                          tabs · menu commands · on-screen controls
+                                        tabs · menus · windows · controls (DOM in a browser, else AX)
        ─► ONE Jev request, all questions answered in parallel (~300 ms)
-              is_command · intent · target · tab · menu · app · key · scroll · query · destructive
-       ─► code picks the answers the chosen intent needs, checks confidence
-       ─► AXPress · synthetic click · NSWorkspace · AppleScript · keystrokes
+              is_command · intent · target · tab · window · menu · app · key · site · query · destructive
+       ─► code picks the answers the chosen intent needs, checks confidence, applies policy
+       ─► AXPress · synthetic click · NSWorkspace · AppleScript · keystrokes · media keys
 ```
 
-Extra questions cost tokens, not latency, so everything is asked at once and the code ignores what
-it doesn't need. Anything the model is bad at — coordinates, counting, writing text — stays in code:
-search terms are cut from your transcript by regex, and Jev only picks which span is the query.
+Two ideas do most of the work:
+
+**Ask once, ask everything.** Extra questions cost tokens, not latency, so every question is asked
+up front and the code ignores what it doesn't need.
+
+**Narrow before asking.** A Choice over 120 on-screen elements splits probability so thin that the
+correct answer scored 0.35 and was rejected. Candidates are shortlisted in code first, which put the
+same answer at 1.00. The same applies to tabs and windows.
+
+Anything the model is bad at stays in code: coordinates, counting, and writing text. Search terms
+are cut from your transcript by regex and Jev only picks which span is the query.
 
 **Source:** `main.swift` (decisions, actions, speech) · `ui.swift` (island, menu bar) ·
-`menus.swift` (menu walker) · `browser.swift` (tabs, search)
+`task.swift` (multi-step goals) · `dom.swift` (page reading) · `windows.swift` · `menus.swift` ·
+`browser.swift` (tabs, sites, search) · `profiles.swift` · `policy.swift` · `parse.swift`
 
 ## Known limits
 
+- **No tests.** This is the biggest gap. Safety-critical logic (`policy.swift`) and the candidate
+  shortlisting are verified only by hand.
 - Needs the network for every command (~300 ms).
-- Only sees what the Accessibility tree exposes — canvas apps and games show little.
+- Only sees what the Accessibility tree or DOM exposes — canvas apps and games show little.
 - Windows on another Space and full-screen windows aren't reliably visible to the API.
-- One action per utterance; no multi-step planning.
-- **⌘M** is claimed system-wide while running, so Minimize Window is unavailable.
+- A single command acts on the frontmost app: "open a new tab in Brave" does not switch to Brave
+  first. Within a compound command, context *is* carried between steps.
+- Multi-step tasks are capped at 8 steps and are the least predictable part; single commands are
+  near-deterministic.
+- Safari is excluded from the DOM path and uses the Accessibility tree.
