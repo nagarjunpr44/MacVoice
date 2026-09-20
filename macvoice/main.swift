@@ -244,7 +244,13 @@ func typeText(_ s: String) {
     i += 16; usleep(4000)
   }
 }
-func openApp(_ url: URL) { let c = NSWorkspace.OpenConfiguration(); c.activates = true; NSWorkspace.shared.openApplication(at: url, configuration: c) { _, _ in } }
+func openApp(_ url: URL, then: ((NSRunningApplication) -> Void)? = nil) {
+  let c = NSWorkspace.OpenConfiguration(); c.activates = true
+  NSWorkspace.shared.openApplication(at: url, configuration: c) { app, _ in
+    guard let app, let then else { return }
+    DispatchQueue.global(qos: .userInitiated).async { then(app) }   // polling must not block the callback
+  }
+}
 
 // MARK: Jev
 struct Answers {
@@ -355,6 +361,13 @@ func questions(_ s: Screen, _ apps: [String: URL], _ rawUtterance: String) -> [S
     for (i, v) in spans.enumerated() { sp["s\(i)"] = "the text: \(v)" }
     q["query"] = ["type": "choice", "instructions": "If the utterance asks to search for something, which of these candidate texts is exactly the thing to search for? Pick the one that is the search terms only, without words like 'search for' or the name of the website.", "criteria": sp]
   }
+  if NSScreen.screens.count > 1 {
+    q["monitor"] = ["type": "choice", "instructions": "If the utterance says where on the desk the window should go, which display does it mean? The built-in display is the laptop's own screen; the external display is the separate monitor.", "criteria": [
+      "builtin": "The laptop screen, the built-in display, the small screen, or 'this' screen when the user is on the laptop",
+      "external": "The external monitor, the second screen, the big screen, or the other display",
+      "other": "The display the window is NOT currently on — 'the other one'",
+      "none": "No display is mentioned"]]
+  }
   q["engine"] = ["type": "choice", "instructions": "If the utterance asks to search, which website should be searched?", "criteria": [
     "google": "A general web search with no particular site named",
     "youtube": "Videos, music, or YouTube is named",
@@ -387,7 +400,7 @@ func pick(_ ans: Answers, _ key: String, _ minP: Double, _ minC: Double) -> (Str
         p >= minP || conf >= minC else { return nil }
   return (choice, p)
 }
-func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, apps: [String: URL]) async {
+func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, apps: [String: URL], allowSplit: Bool = true) async {
   if muted { return }
   if busy { print("  (busy, dropped: \(heard))"); return }
   busy = true; defer { busy = false }
@@ -402,6 +415,22 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     text = String(text[r.upperBound...])
   }
   guard !text.isEmpty else { beep("Tink"); print("  · listening"); return }
+  // Compound command: run the clauses in order, each with a FRESH screen read, because acting on
+  // the first one changes what the second one is looking at.
+  if allowSplit {
+    let clauses = splitClauses(text)
+    if clauses.count > 1 {
+      print("▶ \"\(text)\"  → \(clauses.count) steps")
+      busy = false
+      for (i, c) in clauses.enumerated() {
+        print("  step \(i + 1)/\(clauses.count):")
+        await handle(c, snap: nil, voice: false, jev: jev, apps: apps, allowSplit: false)
+        if i < clauses.count - 1 { try? await Task.sleep(nanoseconds: 700_000_000) }  // let the UI settle
+      }
+      busy = true
+      return
+    }
+  }
   print("▶ \"\(text)\"")
   ui(.thinking(text))
   let low = text.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
@@ -444,7 +473,10 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     run = { click(el, screen) }
   case "open_app":
     guard let (a, ac) = pick(ans, "app", 0.45, 0.55), a != "none", let url = apps[a] else { print("  ✗ which app? \(ans.top("app", 3).map { "\($0.0) \(f2($0.1))" }.joined(separator: ", "))"); beep("Basso"); return }
-    desc = "open \(a) (\(f2(ac)))"; isRisky = false; run = { openApp(url) }
+    let mon = pick(ans, "monitor", 0.45, 0.50)?.0 ?? "none"
+    desc = "open \(a)\(mon == "none" ? "" : " on the \(mon) display") (\(f2(ac)))"
+    isRisky = false
+    run = { mon == "none" ? openApp(url) : openApp(url) { placeWindow(of: $0, named: mon) } }
   case "scroll":
     guard let (d, dc) = pick(ans, "scroll", 0.45, 0.55) else { print("  ✗ which way to scroll?"); return }
     desc = "scroll \(d) in \(screen.app) (\(f2(dc)))"; isRisky = false; run = { scroll(d, screen) }
@@ -481,7 +513,9 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
       }
       win = screen.wins[wi]; wc = c
     }
-    let op = pick(ans, "window_op", 0.40, 0.50)?.0 ?? "focus"
+    var op = pick(ans, "window_op", 0.40, 0.50)?.0 ?? "focus"
+    // "put chrome on the big screen" names a display rather than an operation.
+    if let m = pick(ans, "monitor", 0.45, 0.50)?.0, m != "none", op == "focus" { op = "screen:" + m }
     desc = "\(op) \"\(win.label.prefix(44))\" (\(f2(wc)))"
     isRisky = false
     let theWin = win
@@ -679,7 +713,11 @@ if tabList {
       if d > 0 { print("  (switch to the target app: \(Int(d)) s)"); try? await Task.sleep(nanoseconds: UInt64(d * 1e9)) }
       await handle(line, snap: nil, voice: false, jev: jev, apps: apps)
     }
-    if let t = textCmd, !t.isEmpty { await one(t); exit(0) }
+    if let t = textCmd, !t.isEmpty {
+      await one(t)
+      _ = placementGroup.wait(timeout: .now() + 9)   // window placement finishes after the command
+      exit(0)
+    }
     print(demo ? "demo screen: Cancel, Submit, Save draft, Pricing, Docs, Search, Remember me, Sign in, File, Edit, Delete account, Contact sales. Type commands; Ctrl-D quits." : "type commands; Ctrl-D quits.")
     while let l = readLine() { if !l.isEmpty { await one(l) } }
     exit(0)
@@ -741,8 +779,6 @@ if !snapOnly && !textMode {
   dispatchMain()
 }
 
-// Spans are cut twice (once to build the question, once to read the answer); keep them identical.
-func spansFor(_ text: String) -> [String] { searchSpans(text) }
 
 /// With 31 open tabs a Choice spreads probability so thin the right tab scored 0.10. Narrow the
 /// field in code first — word overlap is enough — and let Jev choose among plausible ones.
