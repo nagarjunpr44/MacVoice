@@ -30,7 +30,8 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
   var waits = 0
 
   for step in 1...maxSteps {
-    let screen = prepareScreen()
+    let tObs = Date()
+    let screen = prepareElementsOnly()
     guard !screen.els.isEmpty else {
       onStep("waiting for \(screen.app)…")
       try? await Task.sleep(nanoseconds: 700_000_000)
@@ -149,7 +150,7 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
       if case .block(let why) = judge(subject: el.label, utterance: goal, appName: screen.app) {
         return "stopped: \(why)"
       }
-      onStep("click \(el.label)  [\(screen.els.count) elements]")
+      onStep("click \(el.label)  [\(screen.els.count) els, \(ms(tObs)) ms]")
       if live { click(el, screen) }
       lastClicked = el.label
       history.append(Step(op: "clicked", detail: el.label))

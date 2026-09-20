@@ -151,6 +151,17 @@ func snapshot(_ app: NSRunningApplication) -> Screen {
   scr.els = kept.enumerated().map { El(id: "e\($0.offset)", axRole: $0.element.1, role: $0.element.2, label: clean($0.element.3), frame: $0.element.4, ref: $0.element.0) }
   return scr
 }
+/// Elements only. The task loop re-observes every step and never uses menus or tabs, and those
+/// two cost most of the ~1.8 s a full read takes on a heavy page.
+func prepareElementsOnly() -> Screen {
+  guard let app = NSWorkspace.shared.frontmostApplication else { return Screen(app: "?", bundle: "", els: [], window: .zero, electron: false) }
+  let base = Screen(app: app.localizedName ?? "?", bundle: app.bundleIdentifier ?? "", els: [], window: .zero, electron: false)
+  if noScreen || isDenied(base.bundle) { return base }
+  var s = snapshot(app)
+  s.running = app
+  return s
+}
+
 func prepareScreen() -> Screen {
   // --target pins every command to one app, so you can watch the log in your terminal without the
   // terminal itself being the thing that gets scrolled.
@@ -448,14 +459,26 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
   // action, so it needs more margin than when "computer" was also required.
   let cmdGate = alwaysOn ? 0.7 : 0.5
   guard isCmd >= cmdGate else { print("  · ignored, not a command (\(f2(isCmd)))"); ui(.idle); return }
-  // Gate on the winning option's probability, not `confidence`. Overlapping-but-equivalent intents
-  // (menu_item vs press_key for "new private window") split the distribution and depress confidence
-  // even when the top choice is right and either route would do the same thing.
-  let intentTop = ans.top("intent", 1).first
-  guard let (intent, ic) = ans.choice("intent"), intent != "none",
-        let ip = intentTop?.1, ip >= 0.5 || ic >= 0.55 else {
-    print("  ✗ not sure what you want: \(ans.top("intent", 3).map { "\($0.0) p\(f2($0.1))" }.joined(separator: ", ")) · conf \(f2(ans.choice("intent")?.1 ?? 0))")
+  // Routing. Ten intents now compete and several genuinely overlap ("type the city" vs a
+  // multi-step goal that types a city), so probability spreads thin and correct answers were
+  // being rejected outright. Two changes, both in code, no extra request:
+  //   1. the intent gate is low, because the REAL guard is the per-intent detail gate below —
+  //      an intent that cannot resolve a target refuses anyway, harmlessly;
+  //   2. a near-tie is broken toward the more specific, cheaper action rather than the
+  //      open-ended one, so "type this" beats "run an 8-step task" when the two are level.
+  let ranked = ans.top("intent", 3)
+  let intentTop = ranked.first
+  guard var intent = intentTop?.0, intent != "none", let ip = intentTop?.1, ip >= 0.35 else {
+    print("  ✗ not sure what you want: \(ranked.map { "\($0.0) p\(f2($0.1))" }.joined(separator: ", "))")
     ui(.fail("not sure what you mean")); beep("Basso"); return
+  }
+  let ic = ans.choice("intent")?.1 ?? 0
+  if ranked.count > 1, ranked[0].1 - ranked[1].1 < 0.12, ranked[1].0 != "none" {
+    let specificity = ["click", "menu_item", "press_key", "open_app", "switch_tab",
+                       "window", "search", "scroll", "type_text", "task"]
+    let a = specificity.firstIndex(of: ranked[0].0) ?? 99
+    let b = specificity.firstIndex(of: ranked[1].0) ?? 99
+    if b < a { intent = ranked[1].0; print("  (near tie \(f2(ranked[0].1))/\(f2(ranked[1].1)) → \(intent))") }
   }
   if isDenied(screen.bundle) && intent != "open_app" { print("  ✗ \(screen.app) is on the deny list; only \"open <app>\" works here"); beep("Basso"); return }
   let act = live && !demo

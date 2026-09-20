@@ -167,13 +167,18 @@ private var tabCache: (at: Date, tabs: [Tab])?
 func allBrowserTabs(limit: Int = 70) -> [Tab] {
   if let c = tabCache, Date().timeIntervalSince(c.at) < 6 { return c.tabs }
   var out: [Tab] = []
+  var partial = false
   for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
     guard let name = app.localizedName, scriptableBrowsers.contains(name) else { continue }
-    out.append(contentsOf: browserTabs(name, limit: limit))
+    let got = browserTabs(name, limit: limit)
+    // A browser we are allowed to script but that returned nothing is a timeout (it is busy being
+    // AX-walked), not an empty browser. Caching that hides its tabs for the next 6 seconds.
+    if got.isEmpty, let b = browserBundles[name], canAutomate(b) { partial = true }
+    out.append(contentsOf: got)
     if out.count >= limit { break }
   }
   let capped = Array(out.prefix(limit))
-  tabCache = (Date(), capped)
+  if !partial { tabCache = (Date(), capped) }
   return capped
 }
 
