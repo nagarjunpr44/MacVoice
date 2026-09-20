@@ -324,6 +324,7 @@ func questions(_ s: Screen, _ apps: [String: URL], _ rawUtterance: String) -> [S
       "search": "Search the web, or a specific site such as YouTube, Wikipedia, GitHub, Amazon or Maps, for something",
       "switch_tab": "Go to, switch to or find an already-open browser tab",
       "window": "Go to, focus, move, resize, maximise or minimise one of the open windows",
+      "task": "A goal that needs SEVERAL steps to finish, such as playing a particular video, searching a site and opening a result, filling in a form, or doing something inside a web page. Not a single click, key press or app launch.",
       "menu_item": "Invoke a command from the application's own menus, such as a preference, a formatting option, an export or a view setting, that is not a visible on-screen button",
       "none": "None of the above"]],
     "scroll": ["type": "choice", "instructions": "In which direction and how far does the utterance ask to scroll?", "criteria": [
@@ -457,6 +458,7 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     ui(.fail("not sure what you mean")); beep("Basso"); return
   }
   if isDenied(screen.bundle) && intent != "open_app" { print("  ✗ \(screen.app) is on the deny list; only \"open <app>\" works here"); beep("Basso"); return }
+  let act = live && !demo
   var desc = "", isRisky = dest >= 0.5, run: () -> Void = {}, why = "", subject = ""
   var self_why = ""
   switch intent {
@@ -482,6 +484,18 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
   case "press_key":
     guard let (k, kc) = pick(ans, "key", 0.45, 0.55), k != "none" else { print("  ✗ which key? \(ans.top("key", 3).map { "\($0.0) \(f2($0.1))" }.joined(separator: ", "))"); return }
     desc = "press \(k) in \(screen.app) (\(f2(kc)))"; subject = k; isRisky = k == "quit_app" || dest >= 0.5; run = { pressKey(k) }
+  case "task":
+    let goal = text
+    print("  ⟳ multi-step goal: \(goal)")
+    if !act { print("  DRY-RUN: would run this as a multi-step task"); ui(.warn("dry-run: " + goal)); return }
+    ui(.thinking("working: " + goal))
+    let outcome = await runTask(goal: goal, jev: jev, apps: apps, live: true) { msg in
+      print("     · \(msg)"); ui(.thinking(msg))
+    }
+    print("  ⟳ \(outcome)")
+    ui(outcome.hasPrefix("done") ? .ok(outcome) : .warn(outcome))
+    beep(outcome.hasPrefix("done") ? "Pop" : "Basso")
+    return
   case "search":
     guard let (sid, sc) = ans.choice("query"), let qi = Int(sid.dropFirst()), qi < spansFor(text).count else {
       print("  ✗ could not tell what to search for"); beep("Basso"); return
@@ -559,7 +573,6 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
   }
   print("  cmd \(f2(isCmd)) · intent \(intent) p\(f2(intentTop?.1 ?? 0))/c\(f2(ic)) · destructive \(f2(dest)) · \(screen.els.count) elements, \(screen.menus.count) menus, \(screen.tabs.count) tabs, \(screen.wins.count) windows, \(tokens) tokens")
   print("  ⏱ read screen \(axMs) ms · Jev \(jevMs) ms · total \(ms(t0)) ms")
-  let act = live && !demo
   if isRisky {
     print("  ⚠ needs confirmation\(self_why.isEmpty ? why : self_why): \(desc)")
     if !act { print("  DRY-RUN: would ask for confirmation"); return }
