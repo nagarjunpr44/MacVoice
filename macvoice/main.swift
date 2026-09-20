@@ -416,7 +416,11 @@ func questions(_ s: Screen, _ apps: [String: URL], _ rawUtterance: String) -> [S
   }
   if !s.els.isEmpty {
     var t: [String: Any] = ["none": "No listed element matches"]
-    for e in s.els { t[e.id] = "\(e.role): \(e.label)" }
+    // Narrow before asking. A Choice over 120 elements splits probability so thin that the RIGHT
+    // answer scored 0.35 and was rejected; the same page shortlisted to ~20 gives it most of the
+    // mass. This is the fix for dilution — not splitting the app into two systems, because any
+    // system choosing among the same 120 elements faces the same arithmetic.
+    for i in shortlistElements(s.els, rawUtterance) { t[s.els[i].id] = "\(s.els[i].role): \(s.els[i].label)" }
     q["target"] = ["type": "choice", "instructions": "Which listed on-screen element does the utterance ask to click, press, select, toggle, focus or open? Choose none if no listed element matches.", "criteria": t]
   }
   return q

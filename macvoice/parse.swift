@@ -29,3 +29,24 @@ func splitClauses(_ text: String) -> [String] {
   if !tail.isEmpty { parts.append(tail) }
   return parts.count > 1 ? parts : [text]
 }
+
+/// Same idea as shortlistTabs/shortlistWindows: cut the candidate list down in code first.
+/// Falls back to the FULL list when nothing matches by word, because a wrong shortlist that drops
+/// the right element is far worse than a long list.
+func shortlistElements(_ els: [El], _ utterance: String, keep: Int = 28) -> [Int] {
+  guard els.count > keep else { return Array(els.indices) }
+  let stop: Set<String> = ["the", "a", "an", "on", "in", "to", "this", "that", "my", "it",
+                           "click", "press", "tap", "open", "go", "please", "current", "button"]
+  let words = utterance.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    .filter { !stop.contains($0) && $0.count > 1 }
+  guard !words.isEmpty else { return Array(els.indices.prefix(keep)) }
+  let scored = els.indices.map { i -> (Int, Int) in
+    let hay = els[i].label.lowercased()
+    return (i, words.reduce(0) { $0 + (hay.contains($1) ? $1.count : 0) })
+  }
+  let hits = scored.filter { $0.1 > 0 }.sorted { $0.1 > $1.1 }
+  guard !hits.isEmpty else { return Array(els.indices.prefix(keep)) }
+  var out = hits.prefix(keep).map(\.0)
+  for i in els.indices where out.count < keep && !out.contains(i) { out.append(i) }
+  return out
+}
