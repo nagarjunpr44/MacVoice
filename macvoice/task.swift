@@ -28,11 +28,23 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
   var lastClicked = ""
   var lastSignature = ""
   var waits = 0
+  var lastFieldIdx = -1
 
   for step in 1...maxSteps {
     let tObs = Date()
-    let screen = prepareElementsOnly()
-    guard !screen.els.isEmpty else {
+    // Try the DOM FIRST and skip the AX walk entirely when it works. Doing the walk and then the
+    // DOM read meant still paying the ~2 s we were trying to avoid.
+    let frontName = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
+    let dom = domUsable(frontName) ? domRead(frontName) : []
+    let usingDom = !dom.isEmpty
+    let screen = usingDom
+      ? Screen(app: frontName, bundle: NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "",
+               els: [], window: .zero, electron: false)
+      : prepareElementsOnly()
+    let items: [(id: String, role: String, label: String)] = usingDom
+      ? dom.map { ("d\($0.idx)", $0.role, $0.label) }
+      : screen.els.prefix(120).map { ($0.id, $0.role, $0.label) }
+    guard !items.isEmpty else {
       onStep("waiting for \(screen.app)…")
       try? await Task.sleep(nanoseconds: 700_000_000)
       continue
@@ -41,7 +53,7 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
     // Candidate text to type, cut from the goal by code. Jev only picks which span.
     let spans = spansFor(goal)
     // A signature of what is on screen, so a step that changed nothing is detectable in code.
-    let signature = screen.els.prefix(25).map(\.label).joined(separator: "|")
+    let signature = items.prefix(25).map(\.label).joined(separator: "|")
     let unchanged = signature == lastSignature
     lastSignature = signature
 
@@ -58,7 +70,7 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
                     "criteria": taskOps],
     ]
     var t: [String: Any] = ["none": "No element is the right target"]
-    for e in screen.els.prefix(120) { t[e.id] = "\(e.role): \(e.label)" }
+    for e in items { t[e.id] = "\(e.role): \(e.label)" }
     q["click_target"] = ["type": "choice",
                          "instructions": "If the next operation is a click, which element should be clicked to advance the goal \"\(goal)\"?",
                          "criteria": t]
@@ -80,13 +92,13 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
       "goal": goal,
       "app": screen.app,
       "step": step,
-      "on_screen": screen.els.prefix(60).map { "\($0.role): \($0.label)" },
+      "on_screen": items.prefix(60).map { "\($0.role): \($0.label)" },
       "done_so_far": history.map { "\($0.op) \($0.detail)" },
     ]
     do { (ans, _) = try await jev.ask(state: state, questions: q) }
     catch { return "step \(step) failed: \(error.localizedDescription)" }
 
-    if ans.noul("already_done") >= 0.80, step > 2 {
+    if ans.noul("already_done") >= 0.80, step > 2, !(unchanged && lastClicked != "") {
       return "done in \(step - 1) step\(step == 2 ? "" : "s")"
     }
     guard var (op, opConf) = pick(ans, "operation", 0.40, 0.50).map({ ($0.0, $0.1) }) else {
@@ -99,7 +111,7 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
     if op == "wait", waits > 2 { op = "click" }
     if op == "click", unchanged,
        let (tid, _) = pick(ans, "click_target", 0.30, 0.45), tid != "none",
-       screen.els.first(where: { $0.id == tid })?.label == lastClicked {
+       items.first(where: { $0.id == tid })?.label == lastClicked {
       op = history.count >= 2 ? "done" : "wait"
     }
 
@@ -107,7 +119,7 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
     case "done":    return "done in \(step - 1) step\(step == 2 ? "" : "s")"
     case "blocked": return "cannot do that from here"
     case "wait":
-      onStep("waiting… (\(screen.els.count) elements)")
+      onStep("waiting… (\(items.count) elements)")
       try? await Task.sleep(nanoseconds: 900_000_000)
       history.append(Step(op: "wait", detail: ""))
 
@@ -118,7 +130,9 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
 
     case "press_enter":
       onStep("press enter")
-      if live { pressKey("enter") }
+      if live {
+        if usingDom, lastFieldIdx >= 0 { _ = domSubmit(frontName, lastFieldIdx) } else { pressKey("enter") }
+      }
       history.append(Step(op: "pressed", detail: "enter"))
       try? await Task.sleep(nanoseconds: 1_400_000_000)   // a submitted search needs longer to render
 
@@ -129,19 +143,26 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
       }
       let payload = spans[si]
       if let (fid, _) = pick(ans, "field_target", 0.35, 0.45), fid != "none",
-         let f = screen.els.first(where: { $0.id == fid }) {
+         let f = items.first(where: { $0.id == fid }) {
         onStep("typing into \(f.label)")
-        if live { click(f, screen); usleep(250_000) }
+        if live {
+          if usingDom, let i = Int(f.id.dropFirst()) {
+            lastFieldIdx = i
+            _ = domFill(frontName, i, payload)
+          } else if let el = screen.els.first(where: { $0.id == f.id }) {
+            click(el, screen); usleep(250_000); typeText(payload)
+          }
+        }
       } else {
         onStep("typing")
+        if live { typeText(payload) }
       }
-      if live { typeText(payload) }
       typedAlready = true
       history.append(Step(op: "typed", detail: payload))
 
     case "click":
       guard let (tid, tc) = pick(ans, "click_target", 0.30, 0.45), tid != "none",
-            let el = screen.els.first(where: { $0.id == tid }) else {
+            let el = items.first(where: { $0.id == tid }) else {
         history.append(Step(op: "no target", detail: ""))
         try? await Task.sleep(nanoseconds: 500_000_000)
         break
@@ -150,8 +171,24 @@ func runTask(goal: String, jev: Jev, apps: [String: URL], maxSteps: Int = 8,
       if case .block(let why) = judge(subject: el.label, utterance: goal, appName: screen.app) {
         return "stopped: \(why)"
       }
-      onStep("click \(el.label)  [\(screen.els.count) els, \(ms(tObs)) ms]")
-      if live { click(el, screen) }
+      onStep("click \(el.label)  [\(items.count) \(usingDom ? "dom" : "ax") els, \(ms(tObs)) ms]")
+      if live {
+        if usingDom {
+          // Read via the DOM (fast), but CLICK via Accessibility (proven). Synthetic DOM clicks,
+          // href navigation and real events at DOM coordinates all failed to open a YouTube
+          // result, while the AX click reached the watch page every time. The AX walk is paid
+          // only on click steps, not on every observation.
+          let axScreen = prepareElementsOnly()
+          if let match = axScreen.els.first(where: { $0.label == el.label })
+              ?? axScreen.els.first(where: { el.label.hasPrefix($0.label) && $0.label.count > 8 }) {
+            click(match, axScreen)
+          } else if let i = Int(el.id.dropFirst()), let d = dom.first(where: { $0.idx == i }),
+                    let o = domViewportOrigin(frontName) {
+            _ = domClickReal(frontName, d, origin: o)
+          }
+        }
+        else if let axEl = screen.els.first(where: { $0.id == el.id }) { click(axEl, screen) }
+      }
       lastClicked = el.label
       history.append(Step(op: "clicked", detail: el.label))
       _ = tc

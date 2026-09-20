@@ -7,7 +7,7 @@ import AVFoundation
 import Speech
 
 // MARK: options (globals first: main.swift runs top to bottom)
-var live = true, alwaysOn = true, noScreen = false, demo = false, repl = false, snapOnly = false, micTest = false, menuList = false, tabList = false, policyList = false
+var live = true, alwaysOn = true, noScreen = false, demo = false, repl = false, snapOnly = false, micTest = false, menuList = false, tabList = false, policyList = false, domList = false
 var textCmd: String?, targetApp: String?, wake = "computer", silenceMs = 700, delaySec = -1.0, model = "jev-latest"
 do {
   var a = Array(CommandLine.arguments.dropFirst())
@@ -24,6 +24,7 @@ do {
     case "--menus": menuList = true
     case "--tabs": tabList = true
     case "--policy": policyList = true
+    case "--dom": domList = true
     case "--mic-test": micTest = true
     case "--text": textCmd = next()
     case "--target": targetApp = next()
@@ -35,7 +36,7 @@ do {
     }
   }
 }
-let textMode = textCmd != nil || repl || demo || snapOnly || menuList || tabList || policyList
+let textMode = textCmd != nil || repl || demo || snapOnly || menuList || tabList || policyList || domList
 // Launched from Finder there are no flags, so fall back to however you last left it.
 if !textMode, UserDefaults.standard.object(forKey: "live") != nil { live = UserDefaults.standard.bool(forKey: "live") }
 
@@ -720,7 +721,18 @@ if !demo && !AXIsProcessTrusted() && !noScreen {
   print("Accessibility is not granted to this terminal. Run once with prompt: System Settings > Privacy & Security > Accessibility > enable your terminal app, then re-run.")
   if snapOnly || live { _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary); exit(1) }
 }
-if policyList {
+if domList {
+  Task {
+    try? await Task.sleep(nanoseconds: UInt64(max(delaySec, 0) * 1e9))
+    let app = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
+    print("\(app): dom available = \(domAvailable(app))")
+    let t = Date()
+    let els = domRead(app)
+    print("\(els.count) elements in \(ms(t)) ms")
+    for e in els.prefix(25) { print("  [\(e.idx)] \(e.role): \(e.label)") }
+    exit(0)
+  }
+} else if policyList {
   Task {
     let samples = [
       "File > Move to Trash", "File > Delete Immediately…", "Finder > Empty Trash",
