@@ -1,0 +1,35 @@
+# Secrets — .env holds TYPESAFE_API_KEY. Never commit it.
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+
+# Build output (regenerate with macvoice/build.sh)
+macvoice/macvoice
+macvoice/macvoice.app/
+*.o
+*.dSYM/
+.build/
+DerivedData/
+
+# Runtime
+macvoice/macvoice.log
+*.log
+
+# Local editor/tool state
+.claude/settings.local.json
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Reference material and working notes, kept local
+docs/
+
+# Code-signing artifact from build.sh
+macvoice/_CodeSignature/
