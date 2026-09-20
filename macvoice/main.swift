@@ -166,7 +166,7 @@ func prepareElementsOnly() -> Screen {
 func prepareScreen() -> Screen {
   // --target pins every command to one app, so you can watch the log in your terminal without the
   // terminal itself being the thing that gets scrolled.
-  let chosen = targetApp.flatMap { t in
+  let chosen = (targetApp ?? ctx.app).flatMap { t in
     NSWorkspace.shared.runningApplications.first {
       $0.activationPolicy == .regular && ($0.localizedName ?? "").localizedCaseInsensitiveContains(t)
     }
@@ -357,6 +357,7 @@ func questions(_ s: Screen, _ apps: [String: URL], _ rawUtterance: String) -> [S
       "scroll": "Scroll, move or jump the current view up, down, to the top or to the bottom",
       "type_text": "Type, write or enter specific words into the focused field",
       "press_key": "Perform an action done with a keyboard or media key rather than by clicking something. Two kinds: editing and navigation (copy, cut, paste, undo, redo, select all, save, find, new tab, close tab, next or previous tab, back, forward, reload, enter, escape, minimise, hide, quit), AND media control — playing, pausing or resuming a video or music, skipping to the next or previous track, and changing or muting the volume. Media control belongs here even when the media is on a web page, because it is not a button that has to be found on screen.",
+      "open_site": "Open a website or web page by name or address — youtube, gmail, github, a company's site, a spoken domain — WITHOUT searching for anything on it",
       "search": "Search the web, or a specific site such as YouTube, Wikipedia, GitHub, Amazon or Maps, for something",
       "switch_tab": "Go to, switch to or find an already-open browser tab",
       "window": "Go to, focus, move, resize, maximise or minimise one of the open windows",
@@ -401,6 +402,11 @@ func questions(_ s: Screen, _ apps: [String: URL], _ rawUtterance: String) -> [S
       "other": "The display the window is NOT currently on — 'the other one'",
       "none": "No display is mentioned"]]
   }
+  q["site"] = ["type": "choice", "instructions": "If the utterance asks to open a website, which one?", "criteria": [
+    "youtube": "YouTube", "gmail": "Gmail or email", "github": "GitHub", "maps": "Google Maps",
+    "amazon": "Amazon", "wikipedia": "Wikipedia", "twitter": "X or Twitter", "reddit": "Reddit",
+    "linkedin": "LinkedIn", "chatgpt": "ChatGPT", "claude": "Claude",
+    "google": "Google's home page", "none": "No website is named"]]
   q["engine"] = ["type": "choice", "instructions": "If the utterance asks to search, which website should be searched?", "criteria": [
     "google": "A general web search with no particular site named",
     "youtube": "Videos, music, or YouTube is named",
@@ -427,6 +433,16 @@ func questions(_ s: Screen, _ apps: [String: URL], _ rawUtterance: String) -> [S
 }
 
 // MARK: deciding
+/// What the previous step of a compound command acted on. Without this, every step starts from
+/// zero: "open youtube in that profile" had no referent, and the step after it searched in
+/// whatever app happened to be frontmost instead of the one just opened.
+struct StepContext {
+  var app: String?          // app the last step acted on
+  var profileHint: String?  // e.g. "work", carried so "that profile" resolves
+  mutating func clear() { app = nil; profileHint = nil }
+}
+var ctx = StepContext()
+
 var pending: (desc: String, run: () -> Void, expires: Date)?
 var busy = false
 let confirmWords: Set<String> = ["confirm", "yes", "do it", "go ahead", "yes confirm"], cancelWords: Set<String> = ["cancel", "no", "stop", "never mind", "nevermind"]
@@ -466,6 +482,7 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     let clauses = splitClauses(text)
     if clauses.count > 1 {
       print("▶ \"\(text)\"  → \(clauses.count) steps")
+      ctx.clear()
       busy = false
       for (i, c) in clauses.enumerated() {
         print("  step \(i + 1)/\(clauses.count):")
@@ -473,6 +490,7 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
         if i < clauses.count - 1 { try? await Task.sleep(nanoseconds: 700_000_000) }  // let the UI settle
       }
       busy = true
+      ctx.clear()
       return
     }
   }
@@ -538,11 +556,22 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
   case "open_app":
     guard let (a, ac) = pick(ans, "app", 0.45, 0.55), a != "none", let url = apps[a] else { print("  ✗ which app? \(ans.top("app", 3).map { "\($0.0) \(f2($0.1))" }.joined(separator: ", "))"); beep("Basso"); return }
     let mon = pick(ans, "monitor", 0.45, 0.50)?.0 ?? "none"
-    desc = "open \(a)\(mon == "none" ? "" : " on the \(mon) display") (\(f2(ac)))"
+    // "open chrome in work profile" — the profile is named in the utterance, or carried from an
+    // earlier step ("...and open youtube in that profile").
+    let hint = text.range(of: "\\b(that|the same|this)\\s+profile\\b", options: [.regularExpression, .caseInsensitive]) != nil
+      ? (ctx.profileHint ?? text) : text
+    let profile = matchProfile(hint, a)
+    desc = "open \(a)\(profile.map { " in \($0.spoken)'s profile" } ?? "")\(mon == "none" ? "" : " on the \(mon) display") (\(f2(ac)))"
     subject = a
     guard policyAllowsOpening(a) else { print("  ⛔ blocked: \(a) is not voice-controllable"); ui(.fail("blocked: \(a)")); beep("Basso"); return }
     isRisky = false
-    run = { mon == "none" ? openApp(url) : openApp(url) { placeWindow(of: $0, named: mon) } }
+    ctx.app = a
+    if let profile { ctx.profileHint = profile.spoken }
+    run = {
+      if let profile { openProfile(profile) }
+      else if mon == "none" { openApp(url) }
+      else { openApp(url) { placeWindow(of: $0, named: mon) } }
+    }
   case "scroll":
     guard let (d, dc) = pick(ans, "scroll", 0.45, 0.55) else { print("  ✗ which way to scroll?"); return }
     desc = "scroll \(d) in \(screen.app) (\(f2(dc)))"; isRisky = false; run = { scroll(d, screen) }
@@ -561,6 +590,18 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     ui(outcome.hasPrefix("done") ? .ok(outcome) : .warn(outcome))
     beep(outcome.hasPrefix("done") ? "Pop" : "Basso")
     return
+  case "open_site":
+    guard let (site, sc) = pick(ans, "site", 0.40, 0.50), site != "none" else {
+      print("  ✗ which site? \(ans.top("site", 3).map { "\($0.0) \(f2($0.1))" }.joined(separator: ", "))"); beep("Basso"); return
+    }
+    let url = siteURL(site)
+    // Open it in the browser this compound command is already working in, not a fresh one.
+    let inBrowser = scriptableBrowsers.contains(ctx.app ?? "") ? ctx.app! :
+                    (scriptableBrowsers.contains(screen.app) ? screen.app : "Google Chrome")
+    desc = "open \(site) in \(inBrowser) (\(f2(sc)))"
+    isRisky = false
+    ctx.app = inBrowser
+    run = { _ = openURLIn(url, browser: inBrowser) }
   case "search":
     guard let (sid, sc) = ans.choice("query"), let qi = Int(sid.dropFirst()), qi < spansFor(text).count else {
       print("  ✗ could not tell what to search for"); beep("Basso"); return
@@ -645,6 +686,7 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     else { print("  proceed? [y/N] ", terminator: ""); if readLine()?.lowercased().hasPrefix("y") == true { run(); beep("Pop") } }
     return
   }
+  if ctx.app == nil { ctx.app = screen.app }
   if act {
     print("  ✓ \(desc)")
     if targetApp != nil, let a = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == screen.app }), !a.isActive {

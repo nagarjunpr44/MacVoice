@@ -19,7 +19,7 @@ let browserBundles = ["Safari": "com.apple.Safari", "Google Chrome": "com.google
                               "Arc": "company.thebrowser.Browser", "Vivaldi": "com.vivaldi.Vivaldi",
                               "Opera": "com.operasoftware.Opera"]
 
-private func run(_ source: String, seconds: Double = 5) -> String? {
+func run(_ source: String, seconds: Double = 5) -> String? {
   // executeAndReturnError can block far past any AppleScript `with timeout`, so cap it here too.
   var result: String??
   let sem = DispatchSemaphore(value: 0)
@@ -206,4 +206,45 @@ func browsersNeedingAutomation() -> [String] {
           scriptableBrowsers.contains(n), let b = browserBundles[n], !canAutomate(b) else { return nil }
     return n
   }
+}
+
+func siteURL(_ s: String) -> String {
+  switch s {
+  case "youtube": return "https://www.youtube.com"
+  case "gmail": return "https://mail.google.com"
+  case "github": return "https://github.com"
+  case "maps": return "https://www.google.com/maps"
+  case "amazon": return "https://www.amazon.com"
+  case "wikipedia": return "https://en.wikipedia.org"
+  case "twitter": return "https://x.com"
+  case "reddit": return "https://www.reddit.com"
+  case "linkedin": return "https://www.linkedin.com"
+  case "chatgpt": return "https://chatgpt.com"
+  case "claude": return "https://claude.ai"
+  default: return "https://www.google.com"
+  }
+}
+
+/// Navigates the FRONT window of a named browser, so a profile opened a step earlier is reused
+/// instead of a new window appearing somewhere else.
+func openURLIn(_ url: String, browser: String) -> Bool {
+  let src = browser == "Safari"
+    ? """
+      tell application "Safari"
+        activate
+        if (count of windows) = 0 then make new document
+        tell window 1 to set current tab to (make new tab with properties {URL:"\(url)"})
+      end tell
+      return "ok"
+      """
+    : """
+      tell application "\(browser)"
+        activate
+        if (count of windows) = 0 then make new window
+        tell window 1 to make new tab with properties {URL:"\(url)"}
+      end tell
+      return "ok"
+      """
+  if run(src) != nil { return true }
+  return NSWorkspace.shared.open(URL(string: url)!)
 }
