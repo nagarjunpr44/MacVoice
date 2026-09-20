@@ -58,7 +58,7 @@ func beep(_ n: String) { let p = Process(); p.executableURL = URL(fileURLWithPat
 
 // MARK: reading the screen (Accessibility tree)
 struct El { let id: String; let axRole: String; let role: String; let label: String; let frame: CGRect; let ref: AXUIElement? }
-struct Screen { var app: String; var bundle: String; var els: [El]; var window: CGRect; var electron: Bool; var menus: [MenuCmd] = []; var running: NSRunningApplication? = nil; var tabs: [Tab] = [] }
+struct Screen { var app: String; var bundle: String; var els: [El]; var window: CGRect; var electron: Bool; var menus: [MenuCmd] = []; var running: NSRunningApplication? = nil; var tabs: [Tab] = []; var wins: [Win] = [] }
 let roleNames = ["AXButton": "button", "AXLink": "link", "AXCheckBox": "checkbox", "AXRadioButton": "radio", "AXMenuItem": "menuitem",
                  "AXMenuBarItem": "menu", "AXPopUpButton": "popup", "AXMenuButton": "popup", "AXComboBox": "combobox",
                  "AXTextField": "field", "AXTextArea": "field", "AXSlider": "slider", "AXDisclosureTriangle": "disclosure"]
@@ -173,10 +173,12 @@ func prepareScreen() -> Screen {
   // and an Apple event queued behind them times out — which is how Chrome's 26 tabs silently
   // became 0 while Brave (idle) still returned its 4.
   let tabs = allBrowserTabs()
+  let wins = allWindows()
   var s = snapshot(app)
   s.running = app
   s.menus = menuCommands(for: app)
   s.tabs = tabs
+  s.wins = wins
   return s
 }
 func demoScreen() -> Screen {
@@ -319,6 +321,7 @@ func questions(_ s: Screen, _ apps: [String: URL], _ rawUtterance: String) -> [S
       "press_key": "Perform an editing, navigation or window action normally done with a keyboard shortcut: copy, cut, paste, undo, redo, select all, save, find, new tab, close tab, next or previous tab, back, forward, reload, enter, escape, minimise, hide or quit",
       "search": "Search the web, or a specific site such as YouTube, Wikipedia, GitHub, Amazon or Maps, for something",
       "switch_tab": "Go to, switch to or find an already-open browser tab",
+      "window": "Go to, focus, move, resize, maximise or minimise one of the open windows",
       "menu_item": "Invoke a command from the application's own menus, such as a preference, a formatting option, an export or a view setting, that is not a visible on-screen button",
       "none": "None of the above"]],
     "scroll": ["type": "choice", "instructions": "In which direction and how far does the utterance ask to scroll?", "criteria": [
@@ -327,6 +330,20 @@ func questions(_ s: Screen, _ apps: [String: URL], _ rawUtterance: String) -> [S
     "key": ["type": "choice", "instructions": "Which keyboard action does the utterance ask for?", "criteria": keyOpts],
     "app": ["type": "choice", "instructions": "Which application does the utterance ask to open or switch to?", "criteria": appOpts],
   ]
+  if !s.wins.isEmpty {
+    var wq: [String: Any] = ["none": "No open window matches"]
+    for i in shortlistWindows(s.wins, rawUtterance) {
+      wq["w\(i)"] = "\(s.wins[i].label)  [\(s.wins[i].screenName)]\(s.wins[i].minimized ? " (minimised)" : "")"
+    }
+    q["window"] = ["type": "choice", "instructions": "The user wants to act on one of the windows that are already open. These are their titles, each prefixed with its application. Which window does the user mean? A window matches when its title or application names the same project, document, site or app the user mentioned, even if the wording differs. Choose none only when no window plausibly matches.", "criteria": wq]
+    q["window_op"] = ["type": "choice", "instructions": "What should be done with that window?", "criteria": [
+      "focus": "Go to it, switch to it, bring it to the front, or show it",
+      "other_screen": "Move it to the other monitor, display or screen",
+      "maximize": "Make it fill the screen, or make it as big as possible",
+      "left_half": "Put it on the left half of the screen",
+      "right_half": "Put it on the right half of the screen",
+      "minimize": "Hide it, minimise it, or put it in the Dock"]]
+  }
   if !s.tabs.isEmpty {
     var t: [String: Any] = ["none": "No open tab matches"]
     for i in shortlistTabs(s.tabs, rawUtterance) { t["t\(i)"] = "\(s.tabs[i].title)  [\(s.tabs[i].app)]" }
@@ -444,6 +461,31 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     desc = "search \(engine) for \"\(query)\" in \(browser) (\(f2(sc)))"
     isRisky = false
     run = { _ = webSearch(query, engine: engine, in: browser) }
+  case "window":
+    // "this window" / "the current window" is a fact, not a judgement: it is the frontmost app's
+    // window. Resolve it BEFORE the confidence gate, or a low-confidence guess rejects the command.
+    let saysThis = text.range(of: "\\b(this|current|the)\\s+window\\b", options: [.regularExpression, .caseInsensitive]) != nil
+    let frontWin = screen.wins.first { $0.app == screen.app && !$0.minimized }
+    var win: Win
+    var wc: Double
+    if saysThis, let f = frontWin {
+      win = f; wc = 1.0
+    } else {
+      guard let (wid, c) = pick(ans, "window", 0.40, 0.55), wid != "none",
+            let wi = Int(wid.dropFirst()), wi < screen.wins.count else {
+        let alts = ans.top("window", 4).map { p -> String in
+          guard p.0 != "none", let i = Int(p.0.dropFirst()), i < screen.wins.count else { return "none \(f2(p.1))" }
+          return "\(screen.wins[i].label.prefix(30)) \(f2(p.1))"
+        }
+        print("  ✗ no confident window. closest: \(alts.joined(separator: " | ")) (\(screen.wins.count) windows)"); beep("Basso"); return
+      }
+      win = screen.wins[wi]; wc = c
+    }
+    let op = pick(ans, "window_op", 0.40, 0.50)?.0 ?? "focus"
+    desc = "\(op) \"\(win.label.prefix(44))\" (\(f2(wc)))"
+    isRisky = false
+    let theWin = win
+    run = { applyWindowOp(op, theWin) }
   case "switch_tab":
     guard let (tid, tc) = pick(ans, "tab", 0.40, 0.55), tid != "none",
           let ti = Int(tid.dropFirst()), ti < screen.tabs.count else {
@@ -473,7 +515,7 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     desc = "type \"\(payload)\" into \(screen.app)"; isRisky = false; run = { typeText(payload) }
   default: return
   }
-  print("  cmd \(f2(isCmd)) · intent \(intent) p\(f2(intentTop?.1 ?? 0))/c\(f2(ic)) · destructive \(f2(dest)) · \(screen.els.count) elements, \(screen.menus.count) menus, \(screen.tabs.count) tabs, \(tokens) tokens")
+  print("  cmd \(f2(isCmd)) · intent \(intent) p\(f2(intentTop?.1 ?? 0))/c\(f2(ic)) · destructive \(f2(dest)) · \(screen.els.count) elements, \(screen.menus.count) menus, \(screen.tabs.count) tabs, \(screen.wins.count) windows, \(tokens) tokens")
   print("  ⏱ read screen \(axMs) ms · Jev \(jevMs) ms · total \(ms(t0)) ms")
   let act = live && !demo
   if isRisky {

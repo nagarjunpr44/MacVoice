@@ -8,7 +8,7 @@
 set -e
 cd "$(dirname "$0")"
 
-swiftc -O -swift-version 5 main.swift ui.swift menus.swift browser.swift -o macvoice \
+swiftc -O -swift-version 5 main.swift ui.swift menus.swift browser.swift windows.swift -o macvoice \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist
 codesign -s - --force --timestamp=none macvoice
 
