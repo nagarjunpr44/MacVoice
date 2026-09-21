@@ -266,7 +266,18 @@ func pressKey(_ name: String) {
   let src = CGEventSource(stateID: .hidSystemState)
   for down in [true, false] { let e = CGEvent(keyboardEventSource: src, virtualKey: k.1, keyDown: down); e?.flags = k.2; post(e); usleep(5000) }
 }
+/// Best effort: browsers only expose the secure subrole with accessibility on (snapshot() turns it on).
+func focusedIsSecure() -> Bool {
+  let sys = AXUIElementCreateSystemWide()
+  AXUIElementSetMessagingTimeout(sys, 0.25)
+  var f: CFTypeRef?, sub: CFTypeRef?
+  guard AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &f) == .success, let f,
+        AXUIElementCopyAttributeValue(f as! AXUIElement, kAXSubroleAttribute as CFString, &sub) == .success else { return false }
+  return (sub as? String) == "AXSecureTextField"
+}
 func typeText(_ s: String) {
+  // Every typing path (type_text, the task loop, dictation) routes through here, so the guard lives here.
+  if focusedIsSecure() { print("  ✗ the focused field is a password field; not typing"); beep("Basso"); return }
   let src = CGEventSource(stateID: .hidSystemState), u = Array(s.utf16)
   var i = 0
   while i < u.count {
@@ -467,6 +478,7 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
   busy = true; defer { busy = false }
   let t0 = Date()
   var text = heard.trimmingCharacters(in: .whitespacesAndNewlines)
+  if dictating { dictate(text); return }   // the mode is already explicit: no wake word, no Jev
   if voice && !alwaysOn {
     guard let r = text.range(of: "^(hey |ok |okay )?\(wake)\\b[,.!? ]*", options: [.regularExpression, .caseInsensitive]) else {
       print("  · heard \"\(text)\" — ignored, start with \"\(wake)\"")  // proves the mic works
@@ -494,6 +506,7 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
       return
     }
   }
+  if wantsDictation(text) { print("▶ \"\(text)\""); startDictation(); return }
   print("▶ \"\(text)\"")
   ui(.thinking(text))
   let low = text.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
@@ -739,9 +752,12 @@ final class Listener {
     t.resume(); timer = t
     print(alwaysOn ? "listening — just say the command, e.g. \"open safari\"" : "listening… say \"\(wake), open safari\"")
   }
+  /// Opens a fresh request, so a change of mode (punctuation on/off) takes effect immediately.
+  func refresh() { q.async { self.req?.endAudio(); self.task?.cancel(); self.begin() } }
   func begin() {
     let r = SFSpeechAudioBufferRecognitionRequest()
     r.shouldReportPartialResults = true
+    r.addsPunctuation = dictating   // prose needs it; a command with a full stop in it would search for "cats."
     if rec.supportsOnDeviceRecognition { r.requiresOnDeviceRecognition = true }  // audio never leaves the Mac
     req = r; last = ""; started = false
     task = rec.recognitionTask(with: r) { [weak self] res, err in
@@ -767,9 +783,10 @@ final class Listener {
   /// "open chrome" into "open" + "chrome". Short transcripts must wait considerably longer.
   private var quietNeeded: Double {
     let words = last.split(whereSeparator: { $0 == " " }).count
-    if words <= 1 { return Double(silenceMs) * 2.4 }   // "open" might still become "open chrome"
-    if words == 2 { return Double(silenceMs) * 1.4 }
-    return Double(silenceMs)
+    let base = Double(silenceMs) * (dictating ? 1.5 : 1)   // a breath mid-sentence should not split the sentence
+    if words <= 1 { return base * 2.4 }   // "open" might still become "open chrome"
+    if words == 2 { return base * 1.4 }
+    return base
   }
   func tick() {
     if micTest {
@@ -895,7 +912,7 @@ if domList {
 }
 let prefs = UserDefaults.standard
 var micLevel: Float = 0
-var muted = false
+var muted = false { didSet { if muted { stopDictation("dictation off") } } }
 var hotkey: Hotkey?
 var island: NotchIsland?
 var statusBar: StatusBar?
@@ -910,7 +927,7 @@ if !snapOnly && !textMode {
   Task { await jev.warm() }
   Timer.scheduledTimer(withTimeInterval: 25, repeats: true) { _ in Task { await jev.warm() } }  // keep the connection open
   listener = Listener(
-    onStart: { ui(.listening("")); snapTask = Task.detached { prepareScreen() } },  // read the screen while you are still talking
+    onStart: { ui(.listening(dictating ? "dictating…" : "")); if !dictating { snapTask = Task.detached { prepareScreen() } } },  // read the screen while you are still talking (not needed to dictate, and the walk would lag the app you are typing into)
     onDone: { text in let s = snapTask; snapTask = nil; Task { await handle(text, snap: s, voice: true, jev: jev, apps: apps) } })
   print(live ? "LIVE: actions will run." : "DRY-RUN: nothing will be done. Add --live to act.")
   listener?.run()
