@@ -12,7 +12,7 @@ func spansFor(_ text: String) -> [String] { searchSpans(text) }
 /// work and a wrong split is far more confusing than a missed one.
 let actionStarters = ["open", "close", "quit", "launch", "start", "go", "switch", "move", "put",
                       "maximi", "minimi", "scroll", "click", "press", "type", "search", "show",
-                      "hide", "focus", "bring", "make", "resize", "snap", "tile", "dictate"]
+                      "hide", "focus", "bring", "make", "resize", "snap", "tile", "dictate", "run"]
 func splitClauses(_ text: String) -> [String] {
   let re = try! NSRegularExpression(pattern: "\\s*(?:,\\s*)?\\b(?:and then|then|and)\\b\\s*", options: .caseInsensitive)
   let ns = text as NSString

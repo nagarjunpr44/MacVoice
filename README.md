@@ -27,6 +27,8 @@ Typical command: **~300 ms** of model time, about **$0.0002**.
 | "scroll down", "copy this", "undo", "new tab" | Scrolling and 24 keyboard shortcuts |
 | "open chrome on the external display **and** calculator on the built in display" | **Compound commands** — several actions in one sentence |
 | "play the Avengers Doomsday trailer" | **Multi-step task** — it works out the steps itself |
+| "run my morning routine" | Runs one of **your own Shortcuts** by name — build a tool in Shortcuts.app and voice can call it |
+| "dictate" … "stop dictating" | **Dictation mode** — everything you say is typed as-is, with punctuation, until you stop (or **⌘M**, or 45 s of silence) |
 
 Nothing is hardcoded. Tabs, menu commands and on-screen controls are read from your Mac on **every
 command**, so a tab you opened a second ago is immediately sayable, and one you closed is gone.
@@ -102,7 +104,8 @@ Low confidence refuses and explains rather than guessing. **⌘M** stops it list
 ### Privacy
 
 Per command, over HTTPS: **your words**, the **frontmost app's name**, and the **labels of visible
-controls** (e.g. `button: Sign in`), plus open tab titles and menu command names.
+controls** (e.g. `button: Sign in`), plus open tab titles, menu command names and the names of
+your Shortcuts. **Dictated text is never sent** — dictation mode does not call the model at all.
 
 Never sent: audio (recognition is on-device), screenshots, page contents, password fields, or
 anything from a blocked app. Nothing is sent unless you speak.
@@ -158,7 +161,8 @@ are cut from your transcript by regex and Jev only picks which span is the query
 
 **Source:** `main.swift` (decisions, actions, speech) · `ui.swift` (island, menu bar) ·
 `task.swift` (multi-step goals) · `dom.swift` (page reading) · `windows.swift` · `menus.swift` ·
-`browser.swift` (tabs, sites, search) · `profiles.swift` · `policy.swift` · `parse.swift`
+`browser.swift` (tabs, sites, search) · `profiles.swift` · `policy.swift` · `parse.swift` ·
+`tools.swift` (Shortcuts) · `dictate.swift` (dictation mode)
 
 ## Known limits
 

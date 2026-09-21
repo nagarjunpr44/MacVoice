@@ -55,7 +55,7 @@ func beep(_ n: String) { let p = Process(); p.executableURL = URL(fileURLWithPat
 
 // MARK: reading the screen (Accessibility tree)
 struct El { let id: String; let axRole: String; let role: String; let label: String; let frame: CGRect; let ref: AXUIElement? }
-struct Screen { var app: String; var bundle: String; var els: [El]; var window: CGRect; var electron: Bool; var menus: [MenuCmd] = []; var running: NSRunningApplication? = nil; var tabs: [Tab] = []; var wins: [Win] = [] }
+struct Screen { var app: String; var bundle: String; var els: [El]; var window: CGRect; var electron: Bool; var menus: [MenuCmd] = []; var running: NSRunningApplication? = nil; var tabs: [Tab] = []; var wins: [Win] = []; var shortcuts: [String] = [] }
 let roleNames = ["AXButton": "button", "AXLink": "link", "AXCheckBox": "checkbox", "AXRadioButton": "radio", "AXMenuItem": "menuitem",
                  "AXMenuBarItem": "menu", "AXPopUpButton": "popup", "AXMenuButton": "popup", "AXComboBox": "combobox",
                  "AXTextField": "field", "AXTextArea": "field", "AXSlider": "slider", "AXDisclosureTriangle": "disclosure"]
@@ -182,11 +182,13 @@ func prepareScreen() -> Screen {
   // became 0 while Brave (idle) still returned its 4.
   let tabs = allBrowserTabs()
   let wins = allWindows()
+  let shortcuts = userShortcuts()
   var s = snapshot(app)
   s.running = app
   s.menus = menuCommands(for: app)
   s.tabs = tabs
   s.wins = wins
+  s.shortcuts = shortcuts
   return s
 }
 func demoScreen() -> Screen {
@@ -431,6 +433,24 @@ func questions(_ s: Screen, _ apps: [String: URL], _ rawUtterance: String) -> [S
     for (i, c) in s.menus.enumerated() { m["m\(i)"] = c.shortcut.isEmpty ? c.path : "\(c.path)  (\(c.shortcut))" }
     q["menu"] = ["type": "choice", "instructions": "Which command from \(s.app)'s menus does the utterance ask for? These are the application's own menu commands, written as 'Menu > Item'. Choose none if nothing matches.", "criteria": m]
   }
+  if !s.shortcuts.isEmpty {
+    // The intent question never sees the shortcut list, so name them in the intent's own description,
+    // or "take a break" would route to click/none. Names matching the utterance go first.
+    let idx = shortlistNames(s.shortcuts, rawUtterance)
+    var c: [String: Any] = ["none": "No shortcut matches"]
+    for i in idx { c["c\(i)"] = clean(s.shortcuts[i]) }
+    q["shortcut"] = ["type": "choice", "instructions": "Which of the user's saved Shortcuts does the utterance ask to run? Each option is a shortcut's name. A shortcut matches when its name says the same thing as the request, even if worded differently. Choose none only when no shortcut plausibly matches.", "criteria": c]
+    let names = idx.prefix(12).map { clean(s.shortcuts[$0]) }.joined(separator: "; ")
+    if var it = q["intent"] as? [String: Any], var ic = it["criteria"] as? [String: Any] {
+      ic["shortcut"] = "Run one of the user's own saved Shortcuts (custom automations and routines) by name. Their shortcuts include: " + names
+      it["criteria"] = ic; q["intent"] = it
+    }
+    // Same for the command gate: "take a break" reads as a remark unless it knows that is a shortcut's name.
+    if var cmd = q["is_command"] as? [String: Any], let ins = cmd["instructions"] as? String {
+      cmd["instructions"] = ins + " It also includes asking to run one of the user's saved Shortcuts by name, even when the name sounds like a plain phrase: " + names + "."
+      q["is_command"] = cmd
+    }
+  }
   if !s.els.isEmpty {
     var t: [String: Any] = ["none": "No listed element matches"]
     // Narrow before asking. A Choice over 120 elements splits probability so thin that the RIGHT
@@ -542,7 +562,7 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
   }
   let ic = ans.choice("intent")?.1 ?? 0
   if ranked.count > 1, ranked[0].1 - ranked[1].1 < 0.12, ranked[1].0 != "none" {
-    let specificity = ["click", "menu_item", "press_key", "open_app", "switch_tab",
+    let specificity = ["shortcut", "click", "menu_item", "press_key", "open_app", "switch_tab",
                        "window", "search", "scroll", "type_text", "task"]
     let a = specificity.firstIndex(of: ranked[0].0) ?? 99
     let b = specificity.firstIndex(of: ranked[1].0) ?? 99
@@ -675,6 +695,18 @@ func handle(_ heard: String, snap: Task<Screen, Never>?, voice: Bool, jev: Jev, 
     desc = "menu \(cmd.path) in \(screen.app) (\(f2(mc)))"
     subject = cmd.path
     run = { if !pressMenu(cmd) { print("  ! menu press failed; try saying the shortcut instead") } }
+  case "shortcut":
+    // isRisky stays at the `destructive` verdict: a routine called "clear my downloads" still asks first.
+    guard let (cid, cc) = pick(ans, "shortcut", 0.45, 0.55), cid != "none",
+          let ci = Int(cid.dropFirst()), ci < screen.shortcuts.count else {
+      let alts = ans.top("shortcut", 3).map { p -> String in
+        guard p.0 != "none", let i = Int(p.0.dropFirst()), i < screen.shortcuts.count else { return "none \(f2(p.1))" }
+        return "\(screen.shortcuts[i].prefix(30)) \(f2(p.1))"
+      }
+      print("  ✗ no confident shortcut. closest: \(alts.joined(separator: " | ")) (\(screen.shortcuts.count) shortcuts)"); beep("Basso"); return
+    }
+    let name = screen.shortcuts[ci]
+    desc = "run shortcut \"\(name)\" (\(f2(cc)))"; subject = name; run = { runShortcut(name) }
   case "type_text":
     guard let r = text.range(of: "\\b(?:type|write|enter|dictate|say)\\b\\s+(.+)$", options: [.regularExpression, .caseInsensitive]) else { print("  ✗ say what to type: \"type hello world\""); return }
     let payload = String(text[r]).replacingOccurrences(of: "^\\S+\\s+", with: "", options: .regularExpression)
